@@ -52,6 +52,8 @@ pub struct PaymentOrder {
     pub memo: String,
     pub tags: Option<Vec<String>>,
     pub platform_fee: i128,
+    /// Loyalty points earned by the payer for this payment (0 when rate is unset).
+    pub loyalty_points: i128,
 }
 
 #[contracttype]

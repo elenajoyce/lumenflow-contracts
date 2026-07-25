@@ -49,6 +49,10 @@ pub enum DataKey {
     FeeRecipient,
     RefundWindow,
     Nonce(Address),
+    /// Points-per-stroop rate configured by admin (u32).
+    LoyaltyRate,
+    /// Accrued loyalty points balance for a payer (i128).
+    LoyaltyBalance(Address),
 }
 
 // ── Admin ─────────────────────────────────────────────────────────────────────
@@ -430,4 +434,46 @@ pub fn get_fee_recipient(env: &Env) -> Option<Address> {
 
 pub fn set_fee_recipient(env: &Env, recipient: &Address) {
     env.storage().instance().set(&DataKey::FeeRecipient, recipient);
+}
+
+// ── Loyalty points ────────────────────────────────────────────────────────────
+
+/// Maximum loyalty points that can be accrued per payer (v1 cap).
+pub const MAX_LOYALTY_POINTS: i128 = 1_000_000_000_000; // 1 trillion
+
+/// Returns the current loyalty rate (points per stroop).  Defaults to 0 (disabled).
+pub fn get_loyalty_rate(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::LoyaltyRate)
+        .unwrap_or(0u32)
+}
+
+/// Stores the loyalty rate (points per stroop) set by the admin.
+pub fn set_loyalty_rate(env: &Env, rate: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::LoyaltyRate, &rate);
+}
+
+/// Returns the total accrued loyalty points for `payer`.
+pub fn get_loyalty_balance(env: &Env, payer: &Address) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::LoyaltyBalance(payer.clone()))
+        .unwrap_or(0i128)
+}
+
+/// Adds `points` to the payer's loyalty balance, capped at MAX_LOYALTY_POINTS.
+/// Returns the new balance.
+pub fn accrue_loyalty_points(env: &Env, payer: &Address, points: i128) -> i128 {
+    let current = get_loyalty_balance(env, payer);
+    let new_balance = current.saturating_add(points).min(MAX_LOYALTY_POINTS);
+    let key = DataKey::LoyaltyBalance(payer.clone());
+    env.storage().persistent().set(&key, &new_balance);
+    // Keep TTL aligned with payment records (2 years)
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PAYMENT_TTL_LEDGERS, PAYMENT_TTL_LEDGERS);
+    new_balance
 }
