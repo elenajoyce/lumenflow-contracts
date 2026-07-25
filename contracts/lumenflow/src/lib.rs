@@ -227,6 +227,31 @@ impl PaymentProcessingContract {
         Ok(())
     }
 
+    /// Set the loyalty points accrual rate (points per stroop). Admin only.
+    ///
+    /// A rate of 0 disables loyalty accrual.  Points are non-transferable and
+    /// non-redeemable in v1 (tracking only).
+    ///
+    /// # Arguments
+    /// * `admin`  - Must be the configured administrator.
+    /// * `rate`   - Points earned per stroop paid (0 = disabled).
+    ///
+    /// # Errors
+    /// * [`PaymentError::Unauthorized`] — caller is not the admin.
+    pub fn set_loyalty_rate(env: Env, admin: Address, rate: u32) -> Result<(), PaymentError> {
+        require_admin(&env, &admin)?;
+        storage::set_loyalty_rate(&env, rate);
+        env.events().publish(("lumenflow", "loyalty_rate_set"), rate);
+        Ok(())
+    }
+
+    /// Returns the total accrued loyalty points for `address`.
+    ///
+    /// Points are non-transferable and non-redeemable in v1.
+    pub fn get_loyalty_balance(env: Env, address: Address) -> i128 {
+        storage::get_loyalty_balance(&env, &address)
+    }
+
     /// Add a token to the payment whitelist. Admin only.
     pub fn add_allowed_token(env: Env, admin: Address, token: Address) -> Result<(), PaymentError> {
         require_admin(&env, &admin)?;
@@ -586,6 +611,7 @@ impl PaymentProcessingContract {
             memo,
             tags,
             platform_fee,
+            loyalty_points: 0,
         };
 
         storage::set_payment(&env, &payment);
@@ -609,6 +635,19 @@ impl PaymentProcessingContract {
         stats.total_volume = stats.total_volume.saturating_add(amount);
         storage::set_global_stats(&env, &stats);
 
+        // Accrue loyalty points atomically with the payment
+        let loyalty_rate = storage::get_loyalty_rate(&env);
+        if loyalty_rate > 0 {
+            let points = (amount as u128)
+                .saturating_mul(loyalty_rate as u128)
+                .min(storage::MAX_LOYALTY_POINTS as u128) as i128;
+            let new_balance = storage::accrue_loyalty_points(&env, &payer, points);
+            env.events().publish(
+                ("lumenflow", "loyalty_accrued"),
+                (payer.clone(), points, new_balance),
+            );
+        }
+
         // Check for suspicious activity (Issue #96)
         let threshold = storage::get_large_payment_threshold(&env);
         if amount >= threshold {
@@ -628,8 +667,6 @@ impl PaymentProcessingContract {
         );
         Ok(())
     }
-
-    /// Process a payment using a per-payer sequential nonce for replay protection.
     ///
     /// The contract stores the next expected nonce for each payer. A payment is
     /// accepted only when the supplied `nonce` equals the stored value, after which
@@ -726,6 +763,7 @@ impl PaymentProcessingContract {
             memo,
             tags,
             platform_fee,
+            loyalty_points: 0,
         };
 
         storage::set_payment(&env, &payment);
@@ -748,6 +786,19 @@ impl PaymentProcessingContract {
         stats.total_payments += 1;
         stats.total_volume = stats.total_volume.saturating_add(amount);
         storage::set_global_stats(&env, &stats);
+
+        // Accrue loyalty points atomically with the payment
+        let loyalty_rate = storage::get_loyalty_rate(&env);
+        if loyalty_rate > 0 {
+            let points = (amount as u128)
+                .saturating_mul(loyalty_rate as u128)
+                .min(storage::MAX_LOYALTY_POINTS as u128) as i128;
+            let new_balance = storage::accrue_loyalty_points(&env, &payer, points);
+            env.events().publish(
+                ("lumenflow", "loyalty_accrued"),
+                (payer.clone(), points, new_balance),
+            );
+        }
 
         // Check for suspicious activity
         let threshold = storage::get_large_payment_threshold(&env);
@@ -854,6 +905,7 @@ impl PaymentProcessingContract {
                 memo: item.memo.clone(),
                 tags: None,
                 platform_fee: 0,
+                loyalty_points: 0,
             };
 
             storage::set_payment(&env, &payment);
@@ -876,6 +928,19 @@ impl PaymentProcessingContract {
             stats.total_payments += 1;
             stats.total_volume = stats.total_volume.saturating_add(item.amount);
             storage::set_global_stats(&env, &stats);
+
+            // Accrue loyalty points for each batch item
+            let loyalty_rate = storage::get_loyalty_rate(&env);
+            if loyalty_rate > 0 {
+                let points = (item.amount as u128)
+                    .saturating_mul(loyalty_rate as u128)
+                    .min(storage::MAX_LOYALTY_POINTS as u128) as i128;
+                let new_balance = storage::accrue_loyalty_points(&env, &payer, points);
+                env.events().publish(
+                    ("lumenflow", "loyalty_accrued"),
+                    (payer.clone(), points, new_balance),
+                );
+            }
 
             env.events().publish(
                 ("lumenflow", "payment_processed"),
@@ -1702,6 +1767,7 @@ impl PaymentProcessingContract {
             memo: String::from_str(&env, ""),
             tags: None,
             platform_fee: 0,
+            loyalty_points: 0,
         };
         storage::set_payment(&env, &payment);
         let _ = storage::add_merchant_payment_id(&env, &ms.merchant_address, &payment_id);
@@ -1711,6 +1777,19 @@ impl PaymentProcessingContract {
         stats.total_payments += 1;
         stats.total_volume = stats.total_volume.saturating_add(ms.amount);
         storage::set_global_stats(&env, &stats);
+
+        // Accrue loyalty points for multisig payments
+        let loyalty_rate = storage::get_loyalty_rate(&env);
+        if loyalty_rate > 0 {
+            let points = (ms.amount as u128)
+                .saturating_mul(loyalty_rate as u128)
+                .min(storage::MAX_LOYALTY_POINTS as u128) as i128;
+            let new_balance = storage::accrue_loyalty_points(&env, &payer, points);
+            env.events().publish(
+                ("lumenflow", "loyalty_accrued"),
+                (payer.clone(), points, new_balance),
+            );
+        }
 
         env.events()
             .publish(("lumenflow", "multisig_executed"), payment_id);
@@ -2047,6 +2126,7 @@ impl PaymentProcessingContract {
             memo: pr.memo,
             tags: None,
             platform_fee: 0,
+            loyalty_points: 0,
         };
 
         storage::set_payment(&env, &payment);
@@ -2058,6 +2138,19 @@ impl PaymentProcessingContract {
         stats.total_payments += 1;
         stats.total_volume = stats.total_volume.saturating_add(pr.amount);
         storage::set_global_stats(&env, &stats);
+
+        // Accrue loyalty points for payment requests
+        let loyalty_rate = storage::get_loyalty_rate(&env);
+        if loyalty_rate > 0 {
+            let points = (pr.amount as u128)
+                .saturating_mul(loyalty_rate as u128)
+                .min(storage::MAX_LOYALTY_POINTS as u128) as i128;
+            let new_balance = storage::accrue_loyalty_points(&env, &payer, points);
+            env.events().publish(
+                ("lumenflow", "loyalty_accrued"),
+                (payer.clone(), points, new_balance),
+            );
+        }
 
         // Remove the request as it's paid
         storage::remove_payment_request(&env, &request_id);

@@ -4535,3 +4535,146 @@ fn test_get_token_whitelist() {
     assert_eq!(list_after.len(), 1);
     assert!(list_after.contains(&token));
 }
+
+// ── Loyalty points tests (#658) ───────────────────────────────────────────────
+
+#[test]
+fn test_loyalty_points_accrued_on_payment() {
+    let (env, client, admin, merchant, payer, token) = setup_payment_env();
+
+    // Set a loyalty rate of 10 points per stroop
+    client.set_loyalty_rate(&admin, &10u32);
+
+    let pub_key = bytes(&env, &[0u8; 32]);
+    let sig = bytes(&env, &[0u8; 64]);
+
+    client.process_payment_with_signature(
+        &payer,
+        &str(&env, "LOYALTY_ORDER_1"),
+        &merchant,
+        &token,
+        &1_000,
+        &str(&env, "loyalty test"),
+        &None,
+        &sig,
+        &pub_key,
+    );
+
+    // 1_000 stroops * 10 rate = 10_000 points
+    let balance = client.get_loyalty_balance(&payer);
+    assert_eq!(balance, 10_000);
+}
+
+#[test]
+fn test_loyalty_zero_rate_no_points() {
+    let (env, client, admin, merchant, payer, token) = setup_payment_env();
+
+    // Default rate is 0 — no points should accrue
+    let _ = admin; // rate not set, stays 0
+
+    let pub_key = bytes(&env, &[0u8; 32]);
+    let sig = bytes(&env, &[0u8; 64]);
+
+    client.process_payment_with_signature(
+        &payer,
+        &str(&env, "LOYALTY_ORDER_ZERO"),
+        &merchant,
+        &token,
+        &5_000,
+        &str(&env, "zero rate"),
+        &None,
+        &sig,
+        &pub_key,
+    );
+
+    let balance = client.get_loyalty_balance(&payer);
+    assert_eq!(balance, 0);
+}
+
+#[test]
+fn test_loyalty_points_accumulate_across_payments() {
+    let (env, client, admin, merchant, payer, token) = setup_payment_env();
+
+    client.set_loyalty_rate(&admin, &5u32);
+    mint(&env, &token, &Address::generate(&env), &payer, 10_000);
+
+    let pub_key = bytes(&env, &[0u8; 32]);
+    let sig = bytes(&env, &[0u8; 64]);
+
+    // First payment: 1_000 * 5 = 5_000 points
+    client.process_payment_with_signature(
+        &payer,
+        &str(&env, "LOYALTY_ACC_1"),
+        &merchant,
+        &token,
+        &1_000,
+        &str(&env, "accrue 1"),
+        &None,
+        &sig,
+        &pub_key,
+    );
+
+    // Second payment: 2_000 * 5 = 10_000 points
+    client.process_payment_with_signature(
+        &payer,
+        &str(&env, "LOYALTY_ACC_2"),
+        &merchant,
+        &token,
+        &2_000,
+        &str(&env, "accrue 2"),
+        &None,
+        &sig,
+        &pub_key,
+    );
+
+    // Total: 5_000 + 10_000 = 15_000
+    let balance = client.get_loyalty_balance(&payer);
+    assert_eq!(balance, 15_000);
+}
+
+#[test]
+fn test_loyalty_points_capped_at_max() {
+    let (env, client, admin, merchant, payer, token) = setup_payment_env();
+
+    // Set an extremely high rate so one payment hits the cap
+    client.set_loyalty_rate(&admin, &u32::MAX);
+    mint(&env, &token, &Address::generate(&env), &payer, 1_000_000_000);
+
+    let pub_key = bytes(&env, &[0u8; 32]);
+    let sig = bytes(&env, &[0u8; 64]);
+
+    client.process_payment_with_signature(
+        &payer,
+        &str(&env, "LOYALTY_CAP"),
+        &merchant,
+        &token,
+        &1_000_000,
+        &str(&env, "cap test"),
+        &None,
+        &sig,
+        &pub_key,
+    );
+
+    let balance = client.get_loyalty_balance(&payer);
+    // Must be capped at MAX_LOYALTY_POINTS (1 trillion)
+    assert_eq!(balance, storage::MAX_LOYALTY_POINTS);
+}
+
+#[test]
+fn test_loyalty_get_balance_zero_for_unknown_address() {
+    let (env, client) = setup();
+    let stranger = Address::generate(&env);
+    let balance = client.get_loyalty_balance(&stranger);
+    assert_eq!(balance, 0);
+}
+
+#[test]
+fn test_set_loyalty_rate_unauthorized() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    client.set_admin(&admin);
+
+    let result = client.try_set_loyalty_rate(&non_admin, &10u32);
+    assert_eq!(result, Err(Ok(PaymentError::Unauthorized)));
+}
